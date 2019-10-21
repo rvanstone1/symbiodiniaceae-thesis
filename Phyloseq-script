@@ -1,0 +1,640 @@
+# Imagine that you start with a dataset called "class" (the name of which got changed here into "coral" after processing)
+# The dataset is a phyloseq object!
+
+###################### Importing the data in R as phyloseq object #######################################
+
+#load libraries 
+library(ape)
+library(phyloseq)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(vegan)
+library(RVAideMemoire)
+library(indicspecies)
+library(DESeq2)
+library(RColorBrewer)
+library(gapminder)
+
+# Read in OTU table
+otuData <- read.table(
+  "table.tsv",
+  header = TRUE,
+  sep = "\t",
+  row.names = 1
+)
+
+
+# Read in taxonomy table
+taxData <- read.table(
+  "taxonomy.tsv",
+  sep = "\t",
+  fill = TRUE,
+  row.names = 1
+)
+
+
+# Read in metadata file
+metaData <- import_qiime_sample_data('ruby_meta1.txt')
+
+
+
+# Add levels of taxonomy to taxonomy table
+colnames(taxData) <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+
+# Convert OTU and taxonomy tables from data frames to matrices for compatibility with phyloseq
+otuDataMat <- as.matrix(otuData)
+taxDataMat <- as.matrix(taxData)
+
+
+# Import tree file as a phylosq object
+tree <- read_tree("tree.nwk")
+
+
+# Combine OTU, taxonomy, and metadata files into a phyloseq object
+phy <- phyloseq(
+  otu_table(
+    otuDataMat, 
+    taxa_are_rows = T
+  ),
+  tax_table(taxDataMat),
+  sample_data(metaData)
+)
+
+
+# Merge the phyloseq objects into a single object
+phy <- merge_phyloseq(phy, tree)
+
+
+# Delete the matrices as they are not used in further analyses
+rm(otuDataMat)
+rm(taxDataMat)
+
+
+###################### Filtering of unwanted taxa and samples and rarefaction #######################################
+
+
+# Remove chloroplast and mitochondria
+
+class2 <- phy %>%
+  subset_taxa(
+    Domain != "Bacteria" &
+    Family  != "mitochondria" &
+    Class   != "Chloroplast"
+  )
+  
+# Remove unneeded samples (Mocks)
+class3 <- subset_samples(class2, !(sampleID %in% c("Mock1", "Mock2", "Mock3")))
+
+# Remove those ASVs that were not observed in any of the current samples
+sum(taxa_sums(class3) == 0)
+class30 <- class3
+class3 <- prune_taxa(taxa_sums(class30) > 0, class3)
+
+# Remove low-abundance samples
+minTotRelAbun <- 1e-5
+x <- taxa_sums(class3)
+keepTaxa <- names(which((x / sum(x)) > minTotRelAbun))
+class4 <- prune_taxa(keepTaxa, class3)
+
+# Rarefy data to the minimum observed number of read:
+set.seed(1)
+coral = rarefy_even_depth(class4, sample.size = 2900, rngseed = 1)
+
+
+##################### Identify contaminant sequences and remove them #########################
+
+
+# Finding taxa only present in the negative controls (here the variable "Type" includes for example
+# Coral, Water and NegativeCtrl, which are the blanks and no template PCRs:
+class4.ngtv.ctrl <- subset_samples(class4, Type %in% c("NegCtrl"))
+
+# From the dataset, remove taxa that are absent from the negative controls:
+sum(taxa_sums(class4.ngtv.ctrl) == 0)
+class4.ngtv.ctrl0 <- class4.ngtv.ctrl
+class4.ngtv.ctrl <- prune_taxa(taxa_sums(class4.ngtv.ctrl0) > 0, class4.ngtv.ctrl)
+
+# Calculating the relative abundance for all taxa in the complete dataset:
+percent <- class4 %>%
+  transform_sample_counts(function(x) {(x/sum(x))} ) 
+
+# Select only the taxa present in the negative controls (we subset them from the main dataset
+# transformed into relative abundance just above). Subsetting is based on the ASV identifier (row names)
+percent.ngtv <- subset_taxa(percent, rownames(tax_table(percent)) %in% rownames(tax_table(class4.ngtv.ctrl)))
+
+# Create these variables to export them as .csv files
+output <- otu_table(percent.ngtv)
+output2 <- tax_table(percent.ngtv)
+
+# Write the list of the "negative control taxa" in a spreadsheet together with their abundances across all samples.
+# I then created a new .xlsx sheet combining the abundance and taxonomic information.
+write.table(output, file = "Abundance_Blanks_16s_Ruby.csv", sep = ",")
+write.table(output2, file = "Abundance_Blanks_Taxa_16s_Ruby.csv", sep = ",")
+
+# Within that Excel spreadsheet, I calculated the average abundance for each ASV across (1) all blanks,
+# (2) no template PCR products, (3) coral and (4) water samples. I then sorted the whole dataset based on
+# the abundance of ASVs in (1) - usually (2) is similar. This provides the most abundant ASVs in the blanks
+# (usually a Burkholderia-Paraburkholderia in my case) and no template PCRs (Ralstonia). 
+# If these ASVs were highly prevalent in the negative controls and much less abundant in the samples,
+# they likely represent reagent contamination and can be removed from the dataset.
+
+# Even though it is arbitrary, there is a threshold suggested by Lee (2015 Frontier Microbiology) to decide
+# when to remove SNVs that could be contaminants. 
+# The threshold I chose was that if the two averages were more than 40% different they were contaminants
+
+# For example, let's say that the these ASVs were identified as contaminants:
+
+Marinobacter5 <- "06b5e1454ef185b5bc7f4ca47bd992b2"
+Deltaproteobacteria <- "11c85c81bbf92551edab8ebebd5393e9"
+Micrococcus <- "11e86a2321423aa8ab1507219e5dfa7b"
+Pelomonas <- "1984c61c1eef5052f94a4ab69861ff01"
+Saccharospirillaceae <- "2322789c09137ff7cddd240c82d6617c"
+Micavibrionales <- "233f6c46c0a8d4b6bc76d92bac5018b4"
+Leptospiraceae <- "2f26574604ac929004ba032a195a8ac2"
+KI89A <- "2fd2f3d4c87c711a37f9c415e8a9c5ae"
+Oceanococcus <- "3dbab6fb4a538cd9806907048ce57f2c"
+Marinoscillum2 <- "41a0864e669378c2a8c418c3d4665c7d"
+Cyclobacteriaceae <- "50e87b427fbb4efb0166c496f54293ea"
+Ochrobactrum <- "52a861498f6e7c09ea26b8fcf39a24ee"
+Gammaproteobacteria <- "57bcd87cc81b962012eed4c67f78e5d5"
+Cyclobacteriaceae1 <- "587b8d1cfb8f222bce211a94e0f6b4ea"
+Flavobacteriales <- "68a643eed6cab3f919613505d7d0f99d"
+Staphylococcus <- "7880fa1f62e6ea6e76f2715a469f43ba"
+Parvularculaceae <- "7ebfed33fea995543992c368e5c97581"
+Marinobacter <- "8131284d353c546e95b65b9e8fd626b0"
+Marinobacter4 <- "a231a2d7b5762dc39583d37e605b3f6a"
+Marinoscillum <- "a461aa9654c4914899df4e79e93fdec1"
+Simkaniaceae <- "a5b49bbec2a2910e1e3c0f276e720a7b"
+OM182 <- "add36f351a8ccd93f646773da3aaebd5"
+Labrenzia <- "bef1168257d4c3a8852faf149ab41337"
+Marinobacter3 <- "c7ecf960ce6b5cf13a55160c4158e3a1"
+Bermanellamarisrubri <- "c9b7375784a459212fb31444b7401c22"
+Roseivirga <- "e112b1eb495e0a736adb0bd97a6d40ca"
+OM1822 <- "d1c91c063173b3d53df0957d1fb39d71"
+Micavibrionaceae <- "d2603537da3f30686b576ed40c77dea5"
+Rhizobiaceae <- "f4b66f71f79d3d0ff34a3d9cb57223c6"
+Kiloniellaceae <- "fa0ada565de08155b5ef1f1d3c0b6753"
+
+
+
+
+# We can put them in a list in order to remove them from the dataset if we judge it appropriate.
+contamination <- c(Marinobacter5, Deltaproteobacteria, Micrococcus, Pelomonas, Saccharospirillaceae, Micavibrionales, Leptospiraceae, KI89A, Oceanococcus, Marinoscillum2, Cyclobacteriaceae, Ochrobactrum, Gammaproteobacteria, Cyclobacteriaceae1, Flavobacteriales, Staphylococcus, Parvularculaceae, Marinobacter, Marinobacter4, Marinoscillum, Simkaniaceae, OM182, Labrenzia, Marinobacter3, Bermanellamarisrubri, Roseivirga, OM1822, Micavibrionaceae, Rhizobiaceae, Kiloniellaceae)
+
+# Removing contaminants from the dataset
+class4.clean <- subset_taxa(class4, !(rownames(tax_table(class4)) %in% contamination))
+
+# Now: filter the dataset and rarefy again (as shown above) before starting the analyses!!!!!
+
+
+###################### Plot rarefaction curves ###############################################
+
+# Note: you do that BEFORE rarefying!!!
+
+# Function definition for rarefaction curves: https://github.com/joey711/phyloseq/issues/143
+# Load the function in R so that it is available in the working space
+
+psdata <- class4.clean
+psdata
+sample_sums(psdata)
+
+set.seed(42)
+
+calculate_rarefaction_curves <- function(psdata, measures, depths) {
+  require('plyr') # ldply
+  require('reshape2') # melt 
+
+estimate_rarified_richness <- function(psdata, measures, depth) {
+    if(max(sample_sums(psdata)) < depth) return()
+    psdata <- prune_samples(sample_sums(psdata) >= depth, psdata)
+
+    rarified_psdata <- rarefy_even_depth(psdata, depth, verbose = FALSE)
+
+    alpha_diversity <- estimate_richness(rarified_psdata, measures = measures)
+
+    # as.matrix forces the use of melt.array, which includes the Sample names (rownames)
+    molten_alpha_diversity <- melt(as.matrix(alpha_diversity), 
+                                   varnames = c('Sample', 'Measure'), value.name = 'Alpha_diversity')
+
+    molten_alpha_diversity
+  }
+
+  names(depths) <- depths # this enables automatic addition of the Depth to the output by ldply
+  rarefaction_curve_data <- ldply(depths, estimate_rarified_richness, psdata = psdata,
+                                  measures = measures, .id = 'Depth', .progress = ifelse(interactive(), 'text', 'none'))
+
+  # convert Depth from factor to numeric
+  rarefaction_curve_data$Depth <- as.numeric(levels(rarefaction_curve_data$Depth))[rarefaction_curve_data$Depth]
+
+  rarefaction_curve_data
+}
+
+
+#### Now, call the rarefaction curve on your non-rarefied dataset and specify which iterations and metrics to use:
+
+rarefaction_curve_data <- calculate_rarefaction_curves(psdata, c('Observed', 'Shannon'),
+                                                       rep(c(1:100 * 10, 1:100 * 1000), each = 10))
+
+ summary(rarefaction_curve_data)
+
+
+# Summarise alpha diversity:
+rarefaction_curve_data_summary <- ddply(rarefaction_curve_data, c('Depth', 'Sample', 'Measure'),
+                                        summarise, Alpha_diversity_mean = mean(Alpha_diversity), 
+                                        Alpha_diversity_sd = sd(Alpha_diversity))
+
+
+# Add sample data:
+# not sure if its supposed to be metadata in there but it just said'my data' and wouldnt run 
+rarefaction_curve_data_summary_verbose <- merge(rarefaction_curve_data_summary,
+                                                data.frame(sample_data(psdata)),
+                                                by.x = 'Sample', by.y = 'row.names')
+
+# Plot:
+
+ggplot(
+  data = rarefaction_curve_data_summary_verbose,
+  mapping = aes(
+    x = Depth,
+    y = Alpha_diversity_mean,
+    ymin = Alpha_diversity_mean - Alpha_diversity_sd,
+    ymax = Alpha_diversity_mean + Alpha_diversity_sd,
+    colour = group,
+    group = sampleID)) +
+  geom_line() +
+  geom_pointrange() +
+  facet_wrap(facets = ~ Measure, scales = 'free_y') 
+
+######################################## Alpha Diversity #############################################
+
+# Call phyloseq function
+
+rich <- estimate_richness(class4.clean)
+
+sampleID <- rownames(rich)
+
+rich <- cbind(sampleID, rich) %>% as.data.frame()
+
+# Adding the evenness measurement
+rich$Evenness <- rich$Shannon / log(rich$Observed)
+
+# Joining the metadata of the samples to the diversity indices
+
+rich_fac <- left_join(sample_data(coral.sub4), rich, by = "sampleID")
+
+#alpha diversity graph which shows all indexes: 
+
+p <- plot_richness(coral.sub4, "heat.tolerance")
+
+(p <- p + geom_boxplot(data = p$data, aes(x = heat.tolerance, y = value, color = NULL), 
+                       alpha = 0.1))
+
+# Select samples of interest to visualise:
+rich_fac_sub <- subset.data.frame(rich_fac, group %in% c("WildType", "Selected"))
+
+ggplot(rich_fac, aes(x = heat.tolerance , y = Chao1, color = NULL)) +
+  geom_boxplot(position =position_dodge(width  =.8)) +
+  theme_bw(base_size = 10) 
+
+#t-test on alpha diversity
+ttest <- t(sapply(rich, function(x) unlist(t.test(x~sample_data(class4.clean)$heat.tolerance)[c("estimate","p.value","statistic","conf.int")])))#to get alpha diversity stats
+ttest
+
+write.table(ttest, file = "Alpha.diversity.heat.tolerance.ttest.csv", sep = ",") #output
+
+###################### BAR PLOT TO EXPLORE ABUNDANCES ##################################################
+
+# To represent at the Family level (instead of ASV level)
+coral.genus <- class4.clean %>% 
+  tax_glom(taxrank = "Genus")
+
+# To group samples by strain type (skip if i want all individual samples)
+merged <- merge_samples(coral.genus, "strain.type")
+sample_data(merged)$strain.type <- levels(sample_data(coral.genus)$strain.type)
+
+# Transform counts in relative abundance and select most abundant families
+percent <- transform_sample_counts(class4.clean, function(x) 100 * x/sum(x))
+
+TopNOTUs = names(sort(taxa_sums(percent), TRUE)[1:20])
+
+newdat = prune_taxa(TopNOTUs, percent)
+
+newdatmelt1 <- psmelt(percent)
+
+#abundance table output
+write.csv(as.data.frame(newdatmelt1), file="test_wt_relative_abundance.csv")
+
+ggplot(newdatmelt1, aes(x = strain.type, y = Abundance, fill = Genus)) +  
+  geom_bar(stat = "identity", color = "black") +
+  theme(legend.position="right", axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ylab("Relative Abundance of top 15 bacterial genus in Symbiodiniaceae samples' \n") +
+  ggtitle("Bacterial genus composition in Symbiodiniaceae samples") 
+
+plot_bar(newdatmelt1, fill="Genus") + facet_wrap(~experiment.stage, scales="free_x", nrow=1) #to merge before and afters for ss and wt 
+
+###################### BUBBLE PLOT ########################################################################
+
+# Select the taxonomic rank to represent (skip this step if you just want to analyse at the ASV level)
+# Do again if you want to look at Genus level
+coral.genus = tax_glom(class4.clean, "Genus", NArm=FALSE)
+
+# Data expressed as relative abundance:
+percent2 <- coral.genus %>% 
+  transform_sample_counts(function(x) {100* (x/sum(x))} ) 
+
+# Select top 10 families to represent and transform the format so that it is "plottable":
+#not sure about prune_taxa, but before it was prune_ and couldn't find the function.
+TopFamilies <- names(sort(taxa_sums(percent2), TRUE)[1:10])
+newdat <- prune_taxa(TopFamilies, percent2)
+newdatmelt <- psmelt(newdat)
+
+# Taxa that are not present in certain samples have to be removed from those samples,
+# otherwise they are still represented by a small dots in the bubble plot
+above_zero <- newdatmelt[which(newdatmelt$Abundance > 0),]
+
+# Bubble plot:
+ggplot(above_zero, aes(x = strain.type, y = Genus, size = Abundance, color = Genus)) +
+  geom_point() +
+  scale_size_area(max_size = 6, breaks = c(1, 5, 10, 20, 40, 70, 90)) + # determines size of bubbles
+  coord_fixed(ratio = 0.9) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Relative abundances of bacterial genus composition in Symbiodiniaceae samples") 
+
+
+###################### Beta diversity ###############################################
+
+# Good idea to set the seed before doing these kinds of analysis in order to generate the same outcome every time
+set.seed(1)
+
+# Calculating dissimilarity matrix for SELECTED SAMPLES:
+DistBC.coral = phyloseq::distance(class4.clean, method = "bray") # Relative abundance; could also be Jaccard for presence/absence
+dat.coral = as(sample_data(class4.clean), "data.frame")
+
+# Performing the permutational analysis of variance on all groups:
+# I am considering here the variable "group", which represents which group they are part of
+# wt or ss.
+
+adonis2(DistBC.coral ~ group, strata = dat.coral$group, data = dat.coral)
+
+
+# Checking for homogeneity of variance:
+# If the p-value is significiant (<0.05) -> variances are not homogeneous.
+# However, this is still acceptable if our design is balanced
+beta <- betadisper(DistBC.coral, sample_data(class4.clean)$group)
+disper.test = permutest(beta)
+disper.test # Ok if p > 0.05
+
+# If homogeneity of variances is respected, we can do pairwise comparisons
+
+testingBC.coral = pairwise.perm.manova(DistBC.coral, sample_data(class4.clean)$group,
+                                       nperm=999, p.method = "BH")
+
+testingBC.coral$p.value
+
+
+print(testingBC.coral)
+
+#csv output
+
+write.table(testingBC.coral[["p.value"]], file="permanova-wt-vs-ss.csv", sep=",")
+
+# PCoA plot (you can do nMDS instead)
+coral.sub <- subset_samples(class4.clean, group %in% c("Selected"))
+
+#do this with wunifrac as well
+class.pcoa <- ordinate(
+  physeq = coral.sub, 
+  method = "PCoA", 
+  distance = "wunifrac")
+
+plot_ordination(
+  physeq = coral.sub,
+  ordination = class.pcoa,
+  color = "group",
+  shape = "group",
+  axes = 1:3,
+  title = NULL) +
+  geom_point(aes(color = group), size = 6) +
+  theme_bw(base_size = 20)
+
+
+###################### Indicator Species Analysis - Indicspecies ###############################################
+
+# This package does not work with data in Phyloseq format, so we will have to adjust that.
+# Let's assume that our dataset is called "coral"
+
+##subset into before and after and run twice 
+
+# Transforming data in relative abundance:
+coral.rel <- transform_sample_counts(class4.clean, function(x) 100 * x/sum(x))
+
+# Community data matrix: convert from phyloseq object
+asv.table <- as(otu_table(coral.rel), "matrix")
+
+# Convert in order to have taxa in columns and species in rows:
+if(taxa_are_rows(coral.rel)) {asv.table <- t(asv.table)}
+asv.table <- as.data.frame(asv.table)
+
+# Defining classification of samples (groups have to be in discrete categories)
+# Let's say that we have three temperatures, "Low", "Medium" and "High" and that we have respecitvely
+# 6, 7 and 5 samples for these categories 
+groups <- c(rep("Selected", 189), rep("WildType", 179), rep("NS", 1), rep("NegCtrl", 2))
+
+
+#for seperated analysis 
+#selected:
+groups <- c(rep("before", 96), rep("after", 93))
+
+#wildtype:
+groups <- c(rep("before", 89), rep("after", 90))
+
+# Performing the indicator value analysis
+indval = multipatt(asv.table, groups, control = how(nperm=999), duleg = TRUE, func = "IndVal.g")
+
+summary(indval)
+
+print(indval)
+
+write.csv(as.data.frame(indval), file="indval-results-ss.csv")
+
+# "Indval.g" allows to correct for different sample size per group
+# duleg = TRUE would not allow to consider combination of groups; so we would obtain species associated either
+# with the Low, Medium or High treatment. If we want combinations of groups to be taken into account,
+# we can use the parameter "restcomb = c(...)" instead of "duleg = TRUE", where we list which groups are to be considered.
+# The list goes in that way: 1 = Selected, 2 = WildType, 3 = NS, 4 = NegCtrl, 5 = Selected + WildType
+# So if we want to consider Medium + High in addition to them individually, we would type:
+indval2 = multipatt(asv.table, groups, control = how(nperm=999), restcomb = c(1, 2, 3, 4, 5), func = "IndVal.g")
+
+# Displaying the data: we can set the thresholds of specificity, sensitivity and significance
+summary(indval2, invdalcomp = TRUE, At = 0.8, Bt = 0.8, alpha = 0.01)
+
+# As explained in the tutorial:
+# The indicator value index is the product of two components, called "A" and "B"
+# Component "A" is the probability that a sample belongs to its target group
+# given the fact that the ASV has been found. This conditional probability is called the specificity
+# of the ASV as indicator of the sample group. Component "B" is the probability of finding the ASV
+# in samples belonging to the sample group. This second conditional probability is called the fidelity
+# of the ASV as indicator of the target sample group.
+
+# For easier reporting, transfer the output in a file:
+capture.output(summary(indval, invdalcomp = TRUE, At = 0.8, Bt = 0.8, alpha = 0.01), file = "IndvalOutput.txt")
+
+###################### DIFFERENTIAL ABUNDANCE ANALYSIS - DESEQ2 ###############################################
+
+# Note: this is done on the UNRAREFIED dataset!
+
+# If you go in R and type vignette("DESeq"), you will obtain instructions about the DESeq2 package and its use.
+# The meaning of the results is explained in section "More information on results columns".
+
+# For example, if you want to identify taxa that are differentially abundant between Treatment A and Treatment B,
+# you first need to subset your samples so that only Treatments A and B remain (discard Treatments C, D...)
+# If your variable is called "Treatment" and dataset "coral", you would proceed as such:
+
+coral.subset <- subset_samples(class4.clean, group %in% c("WildType", "Selected"))
+
+data.deseq2 <- phyloseq_to_deseq2(coral.subset, ~ group) # converting in good format
+
+data.deseq2.test <- DESeq(data.deseq2, test="Wald", fitType="parametric") # performing statistical test
+
+data.deseq2.res <- results(data.deseq2.test, cooksCutoff = FALSE)
+
+alpha <- 0.01 # setting significance threshold value
+
+sigtab <- data.deseq2.res[which(data.deseq2.res$padj < alpha), ] # putting in a table significant taxa
+
+sigtab <- cbind(as(sigtab, "data.frame"), as(tax_table(coral.s)[rownames(sigtab), ], "matrix"))
+
+head(sigtab)
+dim(sigtab)
+
+
+# Plotting the results:
+
+x <- tapply(sigtab$log2FoldChange, sigtab$Family, function(x) max(x))
+x <- sort(x, TRUE)
+sigtab$Family = factor(as.character(sigtab$Family), levels=names(x))
+
+y <- tapply(sigtab$log2FoldChange, sigtab$Genus, function(y) max(y))
+y <- sort(y, TRUE)
+sigtab$Genus = factor(as.character(sigtab$Genus), levels=names(y))
+
+ggplot(sigtab, aes(x=Family, y=log2FoldChange, color=Genus)) + geom_point(size=6) +
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+
+# To interpret the results, you can type:
+                                   
+mcols(data.deseq2.res)$description
+
+# And you will obtain a list, where the second element is:
+# "[2] log2 fold change (MAP): Treatment B vs A"
+
+# Since it is for example written "B vs A" (and not "A vs B"),
+# it means that "B" is the reference treatment to which A is compared.
+
+# So a LogFoldChange of x means that the abundance of that particular taxa
+# is 2^(x) times greater in B than in A. If x is positive,
+# the taxa is more abundant in B, while if x is negative, 2^x < 1 and thus the taxa
+# will be more abundant in A.
+#positive means more abundant in Wildtype but if negative taxa is more abundant in selected 
+#take these results and look at initial ASV table, only look at high abundance taxa and make comments on them 
+#and their functions. 
+
+#Let's look at just the OTUs that were significantly enriched in the 
+#wildtype. First, cleaning up the table a little for legibility.
+posigtab = sigtab[sigtab[, "log2FoldChange"] > 0, ]
+posigtab = posigtab[, c("baseMean", "log2FoldChange", "lfcSE", "padj", "Phylum", "Class", "Family", "Genus")]
+
+
+#to output results, replace resOrdered with whatever your last results thing is 
+write.csv(as.data.frame(sigtab), file="deseq-ALL-results.csv")
+
+#Let's look at just the OTUs that were significantly enriched in the 
+#Selected. First, cleaning up the table a little for legibility.
+
+posigtab2 = sigtab[sigtab[, "log2FoldChange"] < 0, ]
+posigtab2 = posigtab2[, c("baseMean", "log2FoldChange", "lfcSE", "padj", "Phylum", "Class", "Family", "Genus")]
+
+#to output results 
+write.csv(as.data.frame(posigtab2), file="deseq-ss-results.csv")
+
+##BUBBLE PLOT##
+
+# Select top 10 families to represent and transform the format so that it is "plottable":
+#not sure about prune_taxa, but before it was prune_ and couldn't find the function.
+TopFamilies <- names(sort(taxa_sums(percent.sig), TRUE)[1:20])
+newdat <- prune_taxa(TopFamilies, percent.sig)
+newdatmelt <- psmelt(newdat)
+
+# Taxa that are not present in certain samples have to be removed from those samples,
+# otherwise they are still represented by a small dots in the bubble plot
+above_zero <- newdatmelt[which(newdatmelt$Abundance > 0),]
+
+
+# Bubble plot:
+ggplot(above_zero, aes(x = strain.type, y = Genus, size = Abundance, color = Genus)) +
+  geom_point() +
+  scale_size_area(max_size = 6, breaks = c(1, 5, 10, 20, 40, 70, 90)) + # determines size of bubbles
+  coord_fixed(ratio = 0.9) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Relative abundances of bacterial genus composition in Selected Symbiodiniaceae strains before and after treatment") 
+ 
+
+## BOX PLOT ##
+
+p10 <- above_zero %>% 
+  ggplot(aes(x= strain.type, y= Abundance, fill= experiment.stage)) +
+  geom_boxplot() +
+  geom_jitter(width=0.1,alpha=0.2) +
+  xlab("experiment stage")+ 
+  facet_wrap(~Genus) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p10 + coord_cartesian(ylim = c(0, 20)) #to help fix the scale when theyre small
+
+
+######NEW WAY TO MAKE BOXPLOT FROM DESEQ BASED ON P-VALUE######
+
+data.deseq2 <- phyloseq_to_deseq2(coral.subset, ~ group)
+
+dds <- DESeq(data.deseq2, test="Wald", fitType="parametric")
+
+colData(dds)
+
+res <- results(dds, tidy=TRUE, contrast=c("group", "WildType", "Selected")) %>%
+  arrange(pvalue, log2FoldChange) %>%
+  tbl_df()
+res
+
+goi <- res$row[1:15]
+stopifnot(all(goi %in% names(dds)))
+goi
+
+write.csv(as.data.frame(res), file="deseq-all-PVALUE-results.csv")
+
+tcounts <- t(log2((counts(dds[goi, ], normalized=TRUE, replaced=FALSE)+.5))) %>%
+  merge(colData(dds), ., by="row.names") %>%
+  gather(Species, Abundance, (ncol(.)-length(goi)+1):ncol(.))
+
+tcounts %>% 
+  select(Row.names, group, strain.type, Species, Abundance) %>% 
+  head %>% 
+  knitr::kable()
+
+ggplot(tcounts, aes(group, Abundance, fill=group)) + 
+  geom_boxplot() + 
+  facet_wrap(~Species, scales="free_y") + 
+  labs(x="Group", 
+       y="Abundance (log normalized counts)", 
+       fill="(group)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+       
+ggplot(tcounts, aes(x = heat.tolerance, y = Species, size = Abundance, color = heat.tolerance)) +
+  geom_point() +
+  scale_size_area(max_size = 6, breaks = c(1, 5, 10, 20, 40, 70, 90)) + # determines size of bubbles
+  coord_fixed(ratio = 0.9) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
